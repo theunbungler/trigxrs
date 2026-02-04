@@ -1,0 +1,17 @@
+[package]
+name = "trigxrs-search"
+description = "Search execution for trigram-based code search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+trigxrs-core = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+memmap2 = { workspace = true }
+regex = { workspace = true }
+regex-syntax = { workspace = true }
+glob = { workspace = true }
+rayon = { workspace = true }

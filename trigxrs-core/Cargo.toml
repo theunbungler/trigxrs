@@ -1,0 +1,10 @@
+[package]
+name = "trigxrs-core"
+description = "Core data structures and algorithms for trigram-based code search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }

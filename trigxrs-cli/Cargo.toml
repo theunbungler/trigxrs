@@ -1,0 +1,18 @@
+[package]
+name = "trigxrs-cli"
+description = "Command-line tools for trigram-based code search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "trigxrs"
+path = "src/main.rs"
+
+[dependencies]
+trigxrs-core = { workspace = true }
+trigxrs-index = { workspace = true }
+trigxrs-search = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }

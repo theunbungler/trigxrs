@@ -1,0 +1,14 @@
+[package]
+name = "trigxrs-index"
+description = "Index building for trigram-based code search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+trigxrs-core = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+walkdir = { workspace = true }
+rayon = { workspace = true }
