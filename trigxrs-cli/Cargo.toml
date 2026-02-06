@@ -16,3 +16,6 @@ trigxrs-search = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
+walkdir = { workspace = true }
+glob = { workspace = true }
+regex = { workspace = true }

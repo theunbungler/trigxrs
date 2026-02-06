@@ -1,18 +1,22 @@
 //! Literal and pattern search implementation
 //!
-//! Implements trigram-based filtering for fast substring search.
+//! Implements trigram-based filtering for fast substring and regex search.
 //! The algorithm:
-//! 1. Extract trigrams from search pattern
+//! 1. Extract trigrams from search pattern (or literal substrings from regex)
 //! 2. Select the two most selective trigrams (lowest frequency)
 //! 3. Intersect posting lists using distance constraint
-//! 4. Verify candidates against actual content
+//! 4. Verify candidates against actual content (or compiled regex)
 
+use std::collections::BTreeSet;
+
+use regex_syntax::hir::{Hir, HirKind};
 use trigxrs_core::{split_ngrams, NgramOffset, Ngram};
 
 use crate::posting::{
     collect_hits, CompressedPostingIterator, DistanceIterator, HitIterator, MAX_OFFSET,
 };
 use crate::reader::IndexData;
+use crate::error::Error;
 use crate::Result;
 
 /// A search match in the index
@@ -46,6 +50,95 @@ pub struct SearchStats {
 pub struct SearchResult {
     pub matches: Vec<Match>,
     pub stats: SearchStats,
+}
+
+/// Represents extracted literals from a regex for trigram filtering
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegexFilter {
+    /// All literals must appear (from Concat)
+    And(Vec<String>),
+    /// At least one must appear (from Alternation)
+    Or(Vec<String>),
+    /// One literal
+    Single(String),
+    /// No useful literals — scan all files
+    BruteForce,
+}
+
+/// Maximum number of OR branches before falling back to brute force
+const MAX_OR_BRANCHES: usize = 16;
+
+/// Extract literal substrings from a regex HIR tree for trigram filtering
+fn extract_literals_from_hir(hir: &Hir, min_len: usize) -> RegexFilter {
+    match hir.kind() {
+        HirKind::Literal(lit) => {
+            match std::str::from_utf8(&lit.0) {
+                Ok(s) if s.len() >= min_len => RegexFilter::Single(s.to_string()),
+                _ => RegexFilter::BruteForce,
+            }
+        }
+        HirKind::Concat(subs) => {
+            let mut literals = Vec::new();
+            for sub in subs {
+                match extract_literals_from_hir(sub, min_len) {
+                    RegexFilter::BruteForce => {}
+                    RegexFilter::Single(s) => literals.push(s),
+                    RegexFilter::And(mut v) => literals.append(&mut v),
+                    RegexFilter::Or(v) => {
+                        // An OR inside a concat — keep it as a single "any of these" filter
+                        // For simplicity, just add the longest literal from the OR
+                        if let Some(longest) = v.into_iter().max_by_key(|s| s.len()) {
+                            if longest.len() >= min_len {
+                                literals.push(longest);
+                            }
+                        }
+                    }
+                }
+            }
+            match literals.len() {
+                0 => RegexFilter::BruteForce,
+                1 => RegexFilter::Single(literals.into_iter().next().unwrap()),
+                _ => RegexFilter::And(literals),
+            }
+        }
+        HirKind::Alternation(subs) => {
+            if subs.len() > MAX_OR_BRANCHES {
+                return RegexFilter::BruteForce;
+            }
+            let mut literals = Vec::new();
+            for sub in subs {
+                match extract_literals_from_hir(sub, min_len) {
+                    RegexFilter::BruteForce => return RegexFilter::BruteForce,
+                    RegexFilter::Single(s) => literals.push(s),
+                    RegexFilter::And(v) => {
+                        // Take the longest literal from the AND
+                        if let Some(longest) = v.into_iter().max_by_key(|s| s.len()) {
+                            literals.push(longest);
+                        } else {
+                            return RegexFilter::BruteForce;
+                        }
+                    }
+                    RegexFilter::Or(v) => {
+                        // Nested OR — flatten
+                        literals.extend(v);
+                        if literals.len() > MAX_OR_BRANCHES {
+                            return RegexFilter::BruteForce;
+                        }
+                    }
+                }
+            }
+            if literals.is_empty() {
+                RegexFilter::BruteForce
+            } else {
+                RegexFilter::Or(literals)
+            }
+        }
+        HirKind::Capture(cap) => extract_literals_from_hir(&cap.sub, min_len),
+        HirKind::Repetition(rep) if rep.min >= 1 => {
+            extract_literals_from_hir(&rep.sub, min_len)
+        }
+        _ => RegexFilter::BruteForce,
+    }
 }
 
 impl IndexData {
@@ -293,6 +386,182 @@ impl IndexData {
                 if matches.len() >= max {
                     break;
                 }
+            }
+        }
+
+        stats.matches_found = matches.len();
+        Ok(SearchResult { matches, stats })
+    }
+
+    /// Get candidate file indices from a RegexFilter using trigram posting lists.
+    ///
+    /// Returns `None` for brute force (scan all files), or `Some(file_indices)`.
+    fn candidate_files_from_filter(
+        &self,
+        filter: &RegexFilter,
+        stats: &mut SearchStats,
+    ) -> Option<Vec<usize>> {
+        match filter {
+            RegexFilter::BruteForce => None,
+            RegexFilter::Single(lit) => {
+                self.file_indices_for_literal(lit, stats)
+            }
+            RegexFilter::And(lits) => {
+                let mut result_set: Option<BTreeSet<usize>> = None;
+                for lit in lits {
+                    if let Some(file_indices) = self.file_indices_for_literal(lit, stats) {
+                        let set: BTreeSet<usize> = file_indices.into_iter().collect();
+                        result_set = Some(match result_set {
+                            Some(existing) => existing.intersection(&set).copied().collect(),
+                            None => set,
+                        });
+                    }
+                    // If a literal has no trigrams (too short), skip it
+                }
+                result_set.map(|s| s.into_iter().collect())
+            }
+            RegexFilter::Or(lits) => {
+                let mut union_set = BTreeSet::new();
+                for lit in lits {
+                    if let Some(file_indices) = self.file_indices_for_literal(lit, stats) {
+                        union_set.extend(file_indices);
+                    } else {
+                        // If any branch can't be filtered, must scan all
+                        return None;
+                    }
+                }
+                Some(union_set.into_iter().collect())
+            }
+        }
+    }
+
+    /// Get file indices that contain the given literal, using trigram posting lists.
+    fn file_indices_for_literal(&self, lit: &str, stats: &mut SearchStats) -> Option<Vec<usize>> {
+        let ngram_offs = split_ngrams(lit);
+        if ngram_offs.is_empty() {
+            return None; // Too short for trigram filtering
+        }
+
+        // Use the most selective trigram
+        let mut best: Option<(Ngram, usize)> = None;
+        for ngo in &ngram_offs {
+            let freq = self.get_posting_list_size(ngo.ngram);
+            stats.ngram_lookups += 1;
+            if freq == 0 {
+                return Some(Vec::new()); // Trigram not found — no files match
+            }
+            match best {
+                Some((_, best_freq)) if freq < best_freq => {
+                    best = Some((ngo.ngram, freq));
+                }
+                None => {
+                    best = Some((ngo.ngram, freq));
+                }
+                _ => {}
+            }
+        }
+
+        let (best_ngram, _) = best?;
+        let posting = self.get_posting_list(best_ngram)?;
+        let mut iter = CompressedPostingIterator::new(posting);
+        let hits = collect_hits(&mut iter, usize::MAX);
+        stats.bytes_loaded += iter.bytes_loaded();
+
+        let mut file_indices = BTreeSet::new();
+        for &rune_offset in &hits {
+            if let Some((file_idx, _)) = self.global_to_local_rune(rune_offset) {
+                file_indices.insert(file_idx);
+            }
+        }
+
+        Some(file_indices.into_iter().collect())
+    }
+
+    /// Search for a regex pattern in the indexed content
+    ///
+    /// Parses the regex, extracts literal substrings for trigram-based candidate
+    /// filtering, then verifies candidates with the compiled regex.
+    ///
+    /// # Arguments
+    /// * `pattern` - The regex pattern to search for
+    /// * `case_sensitive` - Whether to match case exactly
+    /// * `max_matches` - Maximum number of matches to return (0 = unlimited)
+    pub fn search_regex(
+        &self,
+        pattern: &str,
+        case_sensitive: bool,
+        max_matches: usize,
+    ) -> Result<SearchResult> {
+        let mut stats = SearchStats::default();
+
+        // Parse the regex HIR
+        let hir = regex_syntax::parse(pattern)
+            .map_err(|e| Error::RegexSyntax(e.to_string()))?;
+
+        // If it's a pure literal, delegate to search_literal
+        if let HirKind::Literal(lit) = hir.kind() {
+            if let Ok(s) = std::str::from_utf8(&lit.0) {
+                if case_sensitive {
+                    return self.search_literal(s, true, max_matches);
+                }
+            }
+        }
+
+        // Extract literals for trigram filtering
+        let filter = extract_literals_from_hir(&hir, 3);
+
+        // For case-insensitive search, skip trigram filtering since the index
+        // stores case-sensitive trigrams
+        let candidate_files = if !case_sensitive {
+            None // brute force
+        } else {
+            self.candidate_files_from_filter(&filter, &mut stats)
+        };
+
+        // Compile the regex
+        let re = regex::RegexBuilder::new(pattern)
+            .case_insensitive(!case_sensitive)
+            .build()?;
+
+        let max = if max_matches == 0 { usize::MAX } else { max_matches };
+        let mut matches = Vec::new();
+
+        // Determine which files to scan
+        let file_indices: Box<dyn Iterator<Item = usize>> = match candidate_files {
+            Some(indices) => Box::new(indices.into_iter()),
+            None => Box::new(0..self.file_count()),
+        };
+
+        for file_idx in file_indices {
+            if let Some(content) = self.file_content(file_idx) {
+                // Skip non-UTF-8 files
+                let text = match std::str::from_utf8(content) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+
+                stats.candidates_checked += 1;
+
+                for m in re.find_iter(text) {
+                    let byte_offset = m.start() as u32;
+                    let byte_length = m.len() as u32;
+                    let line_number = self.find_line_number(file_idx, byte_offset);
+
+                    matches.push(Match {
+                        file_idx,
+                        byte_offset,
+                        byte_length,
+                        line_number,
+                    });
+
+                    if matches.len() >= max {
+                        break;
+                    }
+                }
+            }
+
+            if matches.len() >= max {
+                break;
             }
         }
 
@@ -636,5 +905,302 @@ mod integration_tests {
         let result = index.search_literal("abc", true, 2).unwrap();
 
         assert_eq!(result.matches.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod regex_unit_tests {
+    use super::*;
+
+    fn parse_and_extract(pattern: &str) -> RegexFilter {
+        let hir = regex_syntax::parse(pattern).unwrap();
+        extract_literals_from_hir(&hir, 3)
+    }
+
+    #[test]
+    fn test_extract_pure_literal() {
+        assert_eq!(parse_and_extract("hello"), RegexFilter::Single("hello".into()));
+    }
+
+    #[test]
+    fn test_extract_concat_with_wildcard() {
+        let filter = parse_and_extract("foo.*bar");
+        assert_eq!(filter, RegexFilter::And(vec!["foo".into(), "bar".into()]));
+    }
+
+    #[test]
+    fn test_extract_alternation() {
+        let filter = parse_and_extract("foo|bar");
+        assert_eq!(filter, RegexFilter::Or(vec!["foo".into(), "bar".into()]));
+    }
+
+    #[test]
+    fn test_extract_short_literals_brute_force() {
+        // "a" and "b" are both < 3 chars
+        assert_eq!(parse_and_extract("a.*b"), RegexFilter::BruteForce);
+    }
+
+    #[test]
+    fn test_extract_char_class_brute_force() {
+        assert_eq!(parse_and_extract("[a-z]+"), RegexFilter::BruteForce);
+    }
+
+    #[test]
+    fn test_extract_capture_group() {
+        let filter = parse_and_extract("(foo)bar");
+        // (foo)bar is a concat of capture(foo) and literal(bar)
+        // Depending on how regex-syntax parses this, it may be a single literal or concat
+        match filter {
+            RegexFilter::Single(s) => assert_eq!(s, "foobar"),
+            RegexFilter::And(v) => {
+                assert!(v.contains(&"foo".to_string()));
+                assert!(v.contains(&"bar".to_string()));
+            }
+            _ => panic!("unexpected filter: {:?}", filter),
+        }
+    }
+
+    #[test]
+    fn test_extract_wildcard_only_brute_force() {
+        assert_eq!(parse_and_extract(".*"), RegexFilter::BruteForce);
+    }
+
+    #[test]
+    fn test_extract_repetition_with_min_1() {
+        // "foo+" is parsed as concat(literal("fo"), repetition(literal("o"), min=1))
+        let filter = parse_and_extract("foo+");
+        // Should extract something from the literal prefix
+        match filter {
+            RegexFilter::BruteForce => {
+                // If "fo" is too short and "o" is too short, this is expected
+            }
+            RegexFilter::Single(s) => {
+                assert!(s.len() >= 3);
+            }
+            RegexFilter::And(v) => {
+                assert!(!v.is_empty());
+            }
+            _ => panic!("unexpected filter: {:?}", filter),
+        }
+    }
+
+    #[test]
+    fn test_extract_long_alternation() {
+        let filter = parse_and_extract("hello|world|testing");
+        assert_eq!(
+            filter,
+            RegexFilter::Or(vec!["hello".into(), "world".into(), "testing".into()])
+        );
+    }
+}
+
+#[cfg(test)]
+mod regex_integration_tests {
+    use super::*;
+    use std::io::Cursor;
+    use trigxrs_index::IndexBuilder;
+
+    /// Helper to create an index and search with regex
+    fn create_index_and_search_regex(
+        files: &[(&str, &[u8])],
+        pattern: &str,
+        case_sensitive: bool,
+        max_matches: usize,
+    ) -> SearchResult {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut builder = IndexBuilder::new();
+        for (path, content) in files {
+            builder.add_file(path, content).unwrap();
+        }
+
+        let mut temp = NamedTempFile::new().unwrap();
+        {
+            let mut buf = Cursor::new(Vec::new());
+            builder.write_shard(&mut buf).unwrap();
+            temp.write_all(&buf.into_inner()).unwrap();
+        }
+
+        let index = IndexData::open(temp.path()).unwrap();
+        index.search_regex(pattern, case_sensitive, max_matches).unwrap()
+    }
+
+    #[test]
+    fn test_regex_literal_only() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"hello world")],
+            "world",
+            true,
+            0,
+        );
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].byte_offset, 6);
+        assert_eq!(result.matches[0].byte_length, 5);
+    }
+
+    #[test]
+    fn test_regex_simple_alternation() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"hello world")],
+            "hello|world",
+            true,
+            0,
+        );
+        assert_eq!(result.matches.len(), 2);
+        assert_eq!(result.matches[0].byte_offset, 0);  // "hello"
+        assert_eq!(result.matches[1].byte_offset, 6);  // "world"
+    }
+
+    #[test]
+    fn test_regex_wildcard_pattern() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"hello world")],
+            "hel.*rld",
+            true,
+            0,
+        );
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].byte_offset, 0);
+        assert_eq!(result.matches[0].byte_length, 11); // "hello world"
+    }
+
+    #[test]
+    fn test_regex_character_class() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"hello world")],
+            "[hw]orld",
+            true,
+            0,
+        );
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].byte_offset, 6); // "world"
+        assert_eq!(result.matches[0].byte_length, 5);
+    }
+
+    #[test]
+    fn test_regex_no_match() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"hello world")],
+            "xyz+",
+            true,
+            0,
+        );
+        assert_eq!(result.matches.len(), 0);
+    }
+
+    #[test]
+    fn test_regex_multiple_files() {
+        let result = create_index_and_search_regex(
+            &[
+                ("a.txt", b"foo bar baz"),
+                ("b.txt", b"hello world"),
+                ("c.txt", b"foo world"),
+            ],
+            "foo|world",
+            true,
+            0,
+        );
+        // Should find: foo in a.txt, world in b.txt, foo+world in c.txt
+        assert!(result.matches.len() >= 3);
+    }
+
+    #[test]
+    fn test_regex_max_matches() {
+        let result = create_index_and_search_regex(
+            &[
+                ("a.txt", b"abc abc abc"),
+                ("b.txt", b"abc abc abc"),
+            ],
+            "abc",
+            true,
+            3,
+        );
+        assert_eq!(result.matches.len(), 3);
+    }
+
+    #[test]
+    fn test_regex_case_insensitive() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"Hello World HELLO")],
+            "hello",
+            false,
+            0,
+        );
+        assert_eq!(result.matches.len(), 2);
+    }
+
+    #[test]
+    fn test_regex_brute_force_fallback() {
+        // ".*" should scan all files (brute force)
+        let result = create_index_and_search_regex(
+            &[
+                ("a.txt", b"hello"),
+                ("b.txt", b"world"),
+            ],
+            ".*",
+            true,
+            0,
+        );
+        // ".*" matches empty string at every position, but regex find_iter
+        // handles this by returning non-overlapping matches
+        assert!(result.matches.len() >= 2);
+    }
+
+    #[test]
+    fn test_regex_byte_offset_length_correctness() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"abc 12345 xyz")],
+            r"\d+",
+            true,
+            0,
+        );
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].byte_offset, 4);
+        assert_eq!(result.matches[0].byte_length, 5); // "12345"
+    }
+
+    #[test]
+    fn test_regex_invalid_pattern() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut builder = IndexBuilder::new();
+        builder.add_file("test.txt", b"hello").unwrap();
+
+        let mut temp = NamedTempFile::new().unwrap();
+        {
+            let mut buf = Cursor::new(Vec::new());
+            builder.write_shard(&mut buf).unwrap();
+            temp.write_all(&buf.into_inner()).unwrap();
+        }
+
+        let index = IndexData::open(temp.path()).unwrap();
+        let result = index.search_regex("[invalid", true, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_regex_with_repetition() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"foooo bar fooo baz")],
+            "fo{2,}",
+            true,
+            0,
+        );
+        assert_eq!(result.matches.len(), 2);
+    }
+
+    #[test]
+    fn test_regex_anchored() {
+        let result = create_index_and_search_regex(
+            &[("test.txt", b"hello world\nhello again")],
+            "^hello",
+            true,
+            0,
+        );
+        // Default regex is not multiline, so ^ matches start of string only
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].byte_offset, 0);
     }
 }

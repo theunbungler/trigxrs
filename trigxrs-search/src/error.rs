@@ -16,6 +16,9 @@ pub enum Error {
     #[error("regex error: {0}")]
     Regex(#[from] regex::Error),
 
+    #[error("regex syntax error: {0}")]
+    RegexSyntax(String),
+
     #[error("index not found: {0}")]
     IndexNotFound(String),
 

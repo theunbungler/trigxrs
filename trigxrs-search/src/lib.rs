@@ -4,6 +4,7 @@
 //! - Memory-mapped index reader (`IndexData`)
 //! - Posting list iterators for efficient search
 //! - Literal search with trigram filtering
+//! - Regex search with trigram-based candidate filtering
 //! - Search enricher trait for extensions
 
 pub mod error;
