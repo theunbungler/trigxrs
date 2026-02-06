@@ -87,8 +87,9 @@ impl PostingsBuilder {
             let ng = trigxrs_core::runes_to_ngram(rune_window);
 
             // Delta encode the position
+            // rune_index is 1-based count, so rune_index-3 gives 0-based position of first rune
             let last_off = *self.last_offsets.get(&ng).unwrap_or(&0);
-            let new_off = start_rune + rune_index - 2; // Position of first rune in trigram
+            let new_off = start_rune + rune_index - 3; // Position of first rune in trigram
 
             let delta = new_off.saturating_sub(last_off);
             let n = encode_varint(delta as u64, &mut buf);

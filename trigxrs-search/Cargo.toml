@@ -15,3 +15,7 @@ regex = { workspace = true }
 regex-syntax = { workspace = true }
 glob = { workspace = true }
 rayon = { workspace = true }
+
+[dev-dependencies]
+trigxrs-index = { path = "../trigxrs-index" }
+tempfile = "3"

@@ -376,24 +376,25 @@ impl IndexData {
         // Find bucket via B+-tree
         let lookup = self.btree.find(ng)?;
 
-        // Get the bucket of ngrams
-        let bucket_size = self.btree.bucket_size / 2; // Half-filled buckets
-        let bucket_start = self.trigrams_offset as usize + lookup.bucket_index * bucket_size * 8;
+        // posting_index_offset is the starting ngram index for this bucket in the trigrams array
+        // Trigrams are stored contiguously, not in fixed-size buckets
+        let bucket_ngram_start = lookup.posting_index_offset;
+        let bucket_start = self.trigrams_offset as usize + bucket_ngram_start * 8;
 
-        // Calculate actual bucket size (last bucket may be smaller)
-        let remaining_ngrams = self.ngram_count() - lookup.bucket_index * bucket_size;
-        let actual_bucket_size = remaining_ngrams.min(bucket_size);
-        let bucket_end = bucket_start + actual_bucket_size * 8;
+        // Calculate actual bucket size (search from this bucket's start to end of trigrams)
+        let total_ngrams = self.ngram_count();
+        let remaining_ngrams = total_ngrams.saturating_sub(bucket_ngram_start);
+        let bucket_end = self.trigrams_offset as usize + total_ngrams * 8;
 
-        if bucket_end > self.mmap.len() {
+        if bucket_end > self.mmap.len() || remaining_ngrams == 0 {
             return None;
         }
 
         let bucket_data = &self.mmap[bucket_start..bucket_end];
 
-        // Binary search for the ngram in the bucket
+        // Binary search for the ngram in the remaining trigrams
         let mut left = 0;
-        let mut right = actual_bucket_size;
+        let mut right = remaining_ngrams;
 
         while left < right {
             let mid = (left + right) / 2;
@@ -408,7 +409,7 @@ impl IndexData {
             }
         }
 
-        if left >= actual_bucket_size {
+        if left >= remaining_ngrams {
             return None;
         }
 
@@ -421,7 +422,8 @@ impl IndexData {
         }
 
         // Calculate posting list offset
-        let posting_idx = lookup.posting_index_offset + left;
+        // posting_idx is the global ngram index
+        let posting_idx = bucket_ngram_start + left;
         let idx_start = self.posting_index_offset as usize + posting_idx * 4;
         let idx_end = idx_start + 8; // Read two offsets
 

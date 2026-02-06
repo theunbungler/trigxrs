@@ -3,12 +3,13 @@
 //! This crate provides:
 //! - Memory-mapped index reader (`IndexData`)
 //! - Posting list iterators for efficient search
-//! - Literal and regex search (coming soon)
+//! - Literal search with trigram filtering
 //! - Search enricher trait for extensions
 
 pub mod error;
 pub mod posting;
 pub mod reader;
+pub mod search;
 
 pub use error::{Error, Result};
 pub use posting::{
@@ -16,3 +17,4 @@ pub use posting::{
     MergingIterator, MAX_OFFSET,
 };
 pub use reader::{FileEntry, IndexData, IndexMetadata, TableOfContents, TocEntry};
+pub use search::{Match, SearchResult, SearchStats};

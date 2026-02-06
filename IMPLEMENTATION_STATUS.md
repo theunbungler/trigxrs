@@ -5,7 +5,7 @@
 Rust reimplementation of zoekt's core trigram-based code search. This document tracks implementation progress.
 
 **Last Updated:** 2026-02-04
-**Tests Passing:** 73 (33 core + 25 index + 10 search + 5 doctests)
+**Tests Passing:** 87 (33 core + 25 index + 24 search + 5 doctests)
 
 ---
 
@@ -35,24 +35,30 @@ Rust reimplementation of zoekt's core trigram-based code search. This document t
 | Index Reader | `trigxrs-search/src/reader.rs` | Memory-mapped index access |
 | Posting Iterator | `trigxrs-search/src/posting.rs` | Compressed posting traversal |
 
+### Phase 4: Literal Search ✅
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Literal Search | `trigxrs-search/src/search.rs` | Trigram-filtered literal search |
+| Match struct | `trigxrs-search/src/search.rs` | Search result representation |
+| Brute-force fallback | `trigxrs-search/src/search.rs` | Short pattern search (<3 chars) |
+
+**Implementation details:**
+- Extracts trigrams from search pattern using `split_ngrams()`
+- Selects two most selective trigrams (lowest posting frequency)
+- Uses `DistanceIterator` for efficient intersection with distance constraint
+- Verifies candidates against actual content
+- Handles ASCII and Unicode content
+- Supports max_matches limit
+
+```rust
+// API
+pub fn search_literal(&self, pattern: &str, case_sensitive: bool, max_matches: usize) -> Result<SearchResult>;
+```
+
 ---
 
 ## Remaining Phases
-
-### Phase 4: Literal Search (Task #10)
-
-**Reference:** `zoekt/index/indexdata.go:416-500`
-
-Implement `search_literal()`:
-1. Extract trigrams from search pattern
-2. Find two most selective trigrams (lowest posting frequency)
-3. Use `DistanceIterator` to intersect with distance constraint
-4. Verify matches against actual content
-
-```rust
-// Planned API
-pub fn search_literal(&self, pattern: &str, case_sensitive: bool) -> Vec<Match>;
-```
 
 ### Phase 5: Regex Search (Tasks #11)
 
@@ -117,6 +123,7 @@ trigxrs/
 │       ├── lib.rs
 │       ├── reader.rs       # Memory-mapped index reader
 │       ├── posting.rs      # Posting iterators
+│       ├── search.rs       # Literal search implementation
 │       └── error.rs
 └── trigxrs-cli/            # Command-line tools
     └── src/
@@ -138,12 +145,12 @@ trigxrs/
 
 1. **Run tests:** `cargo test`
 2. **Check current tasks:** See task list below
-3. **Next implementation:** Phase 4 literal search in `trigxrs-search/src/search.rs`
+3. **Next implementation:** Phase 5 regex search in `trigxrs-search/src/search.rs`
 
 ### Remaining Tasks
 
 ```
-#10. [pending] Implement literal search with trigram filtering
+#10. [completed] Implement literal search with trigram filtering
 #11. [pending] Implement regex search with literal extraction
 #12. [pending] Implement filters and context extraction
 #13. [pending] Implement Unicode case folding
