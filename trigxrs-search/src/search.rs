@@ -857,6 +857,7 @@ impl IndexData {
     ) -> Result<Vec<Match>> {
         let pattern_bytes = pattern.as_bytes();
         let pattern_lower = pattern.to_lowercase();
+        let finder = memchr::memmem::Finder::new(pattern_bytes);
         let mut matches = Vec::new();
         let max = if max_matches == 0 { usize::MAX } else { max_matches };
 
@@ -870,7 +871,7 @@ impl IndexData {
             if let Some(content) = self.file_content(file_idx) {
                 if case_sensitive {
                     let mut pos = 0;
-                    while let Some(offset) = find_bytes(&content[pos..], pattern_bytes) {
+                    while let Some(offset) = finder.find(&content[pos..]) {
                         let byte_offset = (pos + offset) as u32;
                         let line_number = self.find_line_number(file_idx, byte_offset);
 
@@ -1069,18 +1070,9 @@ fn rune_to_byte_offset(content: &[u8], rune_offset: usize) -> Option<usize> {
     None
 }
 
-/// Find bytes in a slice (like memmem)
+/// Find bytes in a slice using SIMD-accelerated search
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if needle.len() > haystack.len() {
-        return None;
-    }
-
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    memchr::memmem::find(haystack, needle)
 }
 
 #[cfg(test)]

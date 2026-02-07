@@ -11,6 +11,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 memmap2 = { workspace = true }
+memchr = { workspace = true }
 regex = { workspace = true }
 regex-syntax = { workspace = true }
 glob = { workspace = true }
@@ -19,3 +20,8 @@ rayon = { workspace = true }
 [dev-dependencies]
 trigxrs-index = { path = "../trigxrs-index" }
 tempfile = "3"
+criterion = { workspace = true }
+
+[[bench]]
+name = "search_bench"
+harness = false

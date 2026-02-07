@@ -5,7 +5,7 @@
 Rust reimplementation of zoekt's core trigram-based code search. This document tracks implementation progress.
 
 **Last Updated:** 2026-02-07
-**Tests Passing:** 131 (42 core + 25 index + 58 search + 6 doctests)
+**Tests Passing:** 165 (42 core + 25 index + 64 search + 15 integration + 13 zoekt_compat + 6 doctests)
 
 ---
 
@@ -85,28 +85,42 @@ trigxrs index <dir> -o <output.zrst>
 trigxrs search <index> <pattern> [-i] [-c N] [-f "*.rs"] [-r]
 ```
 
----
+### Phase 7: Library API ✅
 
-## Remaining Phases
+| Component | File | Description |
+|-----------|------|-------------|
+| Query struct | `trigxrs-search/src/search.rs` | Combines pattern, type, and options |
+| Searcher | `trigxrs-search/src/searcher.rs` | Multi-shard parallel search via rayon |
+| CLI refactored | `trigxrs-cli/src/main.rs` | Uses `Searcher` API |
 
-### Phase 7: Library API
-
-High-level `Searcher` abstraction for multi-shard search:
-
+**API:**
 ```rust
 pub struct Searcher { ... }
 impl Searcher {
-    pub fn open(paths: &[PathBuf]) -> Result<Self>;
-    pub fn search(&self, query: &Query) -> Result<SearchResults>;
+    pub fn open(paths: &[impl AsRef<Path>]) -> Result<Self>;
+    pub fn search(&self, query: &Query) -> Result<SearchResult>;
+    pub fn file_entry(&self, file_idx: usize) -> Option<&FileEntry>;
+    pub fn file_content(&self, file_idx: usize) -> Option<&[u8]>;
 }
 ```
 
-### Phase 8: Integration Testing & Optimization
+### Phase 8: Integration Testing & Optimization ✅
 
-1. End-to-end tests
-2. Comparison tests against Go zoekt
-3. Performance benchmarks
-4. Optimizations (SIMD, parallel search)
+| Component | File | Description |
+|-----------|------|-------------|
+| E2E integration tests | `trigxrs-search/tests/integration.rs` | 15 end-to-end tests |
+| Zoekt compatibility tests | `trigxrs-search/tests/zoekt_compat.rs` | 13 ported zoekt edge-case tests |
+| Criterion benchmarks | `trigxrs-search/benches/search_bench.rs` | 8 benchmarks (index build, literal, regex) |
+| memchr optimization | `trigxrs-search/src/search.rs` | SIMD-accelerated `memchr::memmem` for byte search |
+
+**Optimizations:**
+- Replaced manual `windows().position()` byte search with `memchr::memmem::find` (SIMD-accelerated)
+- Brute-force loop uses `memchr::memmem::Finder` to amortize SIMD setup across repeated searches
+
+**Benchmarks:**
+```bash
+cargo bench -p trigxrs-search  # Run all benchmarks
+```
 
 ---
 
@@ -131,12 +145,18 @@ trigxrs/
 │       ├── builder.rs       # IndexBuilder + extensions
 │       └── error.rs
 ├── trigxrs-search/          # Search execution
-│   └── src/
-│       ├── lib.rs
-│       ├── reader.rs        # Memory-mapped index reader
-│       ├── posting.rs       # Posting iterators
-│       ├── search.rs        # Literal + regex search, SearchOptions, MatchContext
-│       └── error.rs
+│   ├── src/
+│   │   ├── lib.rs
+│   │   ├── reader.rs        # Memory-mapped index reader
+│   │   ├── posting.rs       # Posting iterators
+│   │   ├── search.rs        # Literal + regex search, SearchOptions, MatchContext
+│   │   ├── searcher.rs      # Multi-shard parallel Searcher
+│   │   └── error.rs
+│   ├── tests/
+│   │   ├── integration.rs   # E2E integration tests
+│   │   └── zoekt_compat.rs  # Zoekt compatibility tests
+│   └── benches/
+│       └── search_bench.rs  # Criterion benchmarks
 └── trigxrs-cli/             # Command-line tools
     └── src/
         └── main.rs          # CLI (index + search subcommands)

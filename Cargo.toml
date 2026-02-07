@@ -27,6 +27,8 @@ unicode-segmentation = "1.10"
 rayon = "1.8"
 walkdir = "2.4"
 thiserror = "1.0"
+memchr = "2.7"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # Internal crates
 trigxrs-core = { path = "trigxrs-core" }
