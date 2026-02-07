@@ -18,4 +18,4 @@ pub use posting::{
     MergingIterator, MAX_OFFSET,
 };
 pub use reader::{FileEntry, IndexData, IndexMetadata, TableOfContents, TocEntry};
-pub use search::{Match, SearchResult, SearchStats};
+pub use search::{Match, MatchContext, SearchOptions, SearchResult, SearchStats};
