@@ -4,8 +4,8 @@
 
 Rust reimplementation of zoekt's core trigram-based code search. This document tracks implementation progress.
 
-**Last Updated:** 2026-02-04
-**Tests Passing:** 87 (33 core + 25 index + 24 search + 5 doctests)
+**Last Updated:** 2026-02-07
+**Tests Passing:** 131 (42 core + 25 index + 58 search + 6 doctests)
 
 ---
 
@@ -43,52 +43,63 @@ Rust reimplementation of zoekt's core trigram-based code search. This document t
 | Match struct | `trigxrs-search/src/search.rs` | Search result representation |
 | Brute-force fallback | `trigxrs-search/src/search.rs` | Short pattern search (<3 chars) |
 
-**Implementation details:**
-- Extracts trigrams from search pattern using `split_ngrams()`
-- Selects two most selective trigrams (lowest posting frequency)
-- Uses `DistanceIterator` for efficient intersection with distance constraint
-- Verifies candidates against actual content
-- Handles ASCII and Unicode content
-- Supports max_matches limit
+### Phase 5: Regex Search ✅
 
+| Component | File | Description |
+|-----------|------|-------------|
+| Regex literal extraction | `trigxrs-search/src/search.rs` | `extract_literals_from_hir()` parses regex AST |
+| Trigram candidate filtering | `trigxrs-search/src/search.rs` | Filters files via trigram posting lists |
+| Regex verification | `trigxrs-search/src/search.rs` | Compiled regex verifies candidates |
+
+**Implementation details:**
+- Uses `regex-syntax` to parse regex HIR and extract literal substrings
+- Supports `And` (concat), `Or` (alternation), `Single`, and `BruteForce` filter types
+- Pure literals delegate to `search_literal` for efficiency
+- Case-insensitive regex uses trigram variant expansion (not brute force)
+
+### Phase 6: Filters, Context & Case Folding ✅
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Case folding | `trigxrs-core/src/case.rs` | `generate_case_ngrams()` for trigram variant expansion |
+| SearchOptions | `trigxrs-search/src/search.rs` | Configurable search: case, max_matches, context, file filter |
+| MatchContext | `trigxrs-search/src/search.rs` | Context lines before/after matches |
+| Case-insensitive literal | `trigxrs-search/src/search.rs` | Trigram variant expansion + case-insensitive verify |
+| Case-insensitive regex | `trigxrs-search/src/search.rs` | Lowercased filter with case-variant trigram lookup |
+| File path filtering | `trigxrs-search/src/search.rs` | Glob pattern filtering integrated into search |
+| CLI integration | `trigxrs-cli/src/main.rs` | Uses `SearchOptions` API, `MatchContext` for display |
+
+**API:**
 ```rust
-// API
+pub fn search_literal_opts(&self, pattern: &str, opts: &SearchOptions) -> Result<SearchResult>;
+pub fn search_regex_opts(&self, pattern: &str, opts: &SearchOptions) -> Result<SearchResult>;
+
+// Legacy wrappers (still work, delegate to _opts variants):
 pub fn search_literal(&self, pattern: &str, case_sensitive: bool, max_matches: usize) -> Result<SearchResult>;
+pub fn search_regex(&self, pattern: &str, case_sensitive: bool, max_matches: usize) -> Result<SearchResult>;
+```
+
+**CLI:**
+```bash
+trigxrs index <dir> -o <output.zrst>
+trigxrs search <index> <pattern> [-i] [-c N] [-f "*.rs"] [-r]
 ```
 
 ---
 
 ## Remaining Phases
 
-### Phase 5: Regex Search (Tasks #11)
+### Phase 7: Library API
 
-**Reference:** `zoekt/internal/syntaxutil/regexp.go`
+High-level `Searcher` abstraction for multi-shard search:
 
-1. Use `regex-syntax` crate to parse regex AST
-2. Extract literal substrings from regex
-3. Select trigrams from literals
-4. Filter candidates, verify with full regex
-
-### Phase 6: Filters & Context (Tasks #12, #13)
-
-1. **File path filtering** - glob patterns for include/exclude
-2. **Context extraction** - lines before/after matches
-3. **Unicode case folding** - full SimpleFold support
-
-### Phase 7: CLI & API (Tasks #14, #15)
-
-1. **CLI commands:**
-   - `trigxrs index <dir> -o <output.zrst>`
-   - `trigxrs search <index> <pattern>`
-
-2. **Library API:**
-   ```rust
-   pub struct Searcher { ... }
-   impl Searcher {
-       pub fn open(paths: &[PathBuf]) -> Result<Self>;
-       pub fn search(&self, query: &Query) -> Result<SearchResults>;
-   }
-   ```
+```rust
+pub struct Searcher { ... }
+impl Searcher {
+    pub fn open(paths: &[PathBuf]) -> Result<Self>;
+    pub fn search(&self, query: &Query) -> Result<SearchResults>;
+}
+```
 
 ### Phase 8: Integration Testing & Optimization
 
@@ -104,30 +115,31 @@ pub fn search_literal(&self, pattern: &str, case_sensitive: bool, max_matches: u
 ```
 trigxrs/
 ├── Cargo.toml              # Workspace
-├── trigxrs-core/           # Core algorithms (no I/O)
+├── trigxrs-core/            # Core algorithms (no I/O)
 │   └── src/
 │       ├── lib.rs
-│       ├── ngram.rs        # Trigram encoding
-│       ├── varint.rs       # Delta-varint compression
-│       ├── btree.rs        # B+-tree index
+│       ├── ngram.rs         # Trigram encoding
+│       ├── varint.rs        # Delta-varint compression
+│       ├── btree.rs         # B+-tree index
+│       ├── case.rs          # Unicode case folding
 │       └── error.rs
-├── trigxrs-index/          # Index building
+├── trigxrs-index/           # Index building
 │   └── src/
 │       ├── lib.rs
-│       ├── postings.rs     # Posting list builder
-│       ├── writer.rs       # Index file writer
-│       ├── builder.rs      # IndexBuilder + extensions
+│       ├── postings.rs      # Posting list builder
+│       ├── writer.rs        # Index file writer
+│       ├── builder.rs       # IndexBuilder + extensions
 │       └── error.rs
-├── trigxrs-search/         # Search execution
+├── trigxrs-search/          # Search execution
 │   └── src/
 │       ├── lib.rs
-│       ├── reader.rs       # Memory-mapped index reader
-│       ├── posting.rs      # Posting iterators
-│       ├── search.rs       # Literal search implementation
+│       ├── reader.rs        # Memory-mapped index reader
+│       ├── posting.rs       # Posting iterators
+│       ├── search.rs        # Literal + regex search, SearchOptions, MatchContext
 │       └── error.rs
-└── trigxrs-cli/            # Command-line tools
+└── trigxrs-cli/             # Command-line tools
     └── src/
-        └── main.rs         # CLI (stub)
+        └── main.rs          # CLI (index + search subcommands)
 ```
 
 ---
@@ -138,25 +150,7 @@ trigxrs/
 2. **Extension Trait:** `IndexExtension` allows bolt-on features without modifying core
 3. **Memory Mapping:** Uses `memmap2` for efficient index access
 4. **Posting Format:** Delta-varint encoded rune offsets (matches zoekt)
-
----
-
-## How to Continue
-
-1. **Run tests:** `cargo test`
-2. **Check current tasks:** See task list below
-3. **Next implementation:** Phase 5 regex search in `trigxrs-search/src/search.rs`
-
-### Remaining Tasks
-
-```
-#10. [completed] Implement literal search with trigram filtering
-#11. [pending] Implement regex search with literal extraction
-#12. [pending] Implement filters and context extraction
-#13. [pending] Implement Unicode case folding
-#14. [pending] Implement CLI tools
-#15. [pending] Implement library API with Searcher
-```
+5. **Case Folding:** Trigram variant expansion via `generate_case_ngrams()` — no brute force
 
 ---
 

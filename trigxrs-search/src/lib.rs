@@ -11,6 +11,7 @@ pub mod error;
 pub mod posting;
 pub mod reader;
 pub mod search;
+pub mod searcher;
 
 pub use error::{Error, Result};
 pub use posting::{
@@ -18,4 +19,5 @@ pub use posting::{
     MergingIterator, MAX_OFFSET,
 };
 pub use reader::{FileEntry, IndexData, IndexMetadata, TableOfContents, TocEntry};
-pub use search::{Match, MatchContext, SearchOptions, SearchResult, SearchStats};
+pub use search::{Match, MatchContext, Query, SearchOptions, SearchResult, SearchStats};
+pub use searcher::Searcher;

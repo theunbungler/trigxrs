@@ -204,98 +204,92 @@ fn cmd_search(
         .map(|p| glob::Pattern::new(p))
         .transpose()?;
 
-    let opts = trigxrs_search::SearchOptions {
-        case_sensitive: !case_insensitive,
-        max_matches: 0,
-        context_lines: context,
-        file_pattern: file_pat,
+    let query = trigxrs_search::Query {
+        pattern: pattern.to_string(),
+        is_regex,
+        options: trigxrs_search::SearchOptions {
+            case_sensitive: !case_insensitive,
+            max_matches: 0,
+            context_lines: context,
+            file_pattern: file_pat,
+        },
     };
 
-    for index_path in index_paths {
-        let index = trigxrs_search::IndexData::open(index_path)?;
+    let searcher = trigxrs_search::Searcher::open(index_paths)?;
+    let result = searcher.search(&query)?;
 
-        let result = if is_regex {
-            index.search_regex_opts(pattern, &opts)?
-        } else {
-            index.search_literal_opts(pattern, &opts)?
-        };
+    if context > 0 && !result.contexts.is_empty() {
+        let mut last_file_idx: Option<usize> = None;
+        let mut last_printed_line: Option<usize> = None;
 
-        if context > 0 && !result.contexts.is_empty() {
-            // Use MatchContext for display
-            let mut last_file_idx: Option<usize> = None;
-            let mut last_printed_line: Option<usize> = None;
+        for ctx in &result.contexts {
+            let file_entry = searcher.file_entry(ctx.m.file_idx).unwrap();
+            let match_line_0 = ctx.m.line_number.unwrap_or(1).saturating_sub(1) as usize;
 
-            for ctx in &result.contexts {
-                let file_entry = &index.files()[ctx.m.file_idx];
-                let match_line_0 = ctx.m.line_number.unwrap_or(1).saturating_sub(1) as usize;
-
-                let need_separator = if ctx.m.file_idx != last_file_idx.unwrap_or(usize::MAX) {
-                    last_printed_line = None;
-                    last_file_idx = Some(ctx.m.file_idx);
-                    false
-                } else {
-                    let ctx_start = match_line_0.saturating_sub(context);
-                    match last_printed_line {
-                        Some(last) if ctx_start > last + 1 => true,
-                        _ => false,
-                    }
-                };
-
-                if need_separator {
-                    println!("--");
+            let need_separator = if ctx.m.file_idx != last_file_idx.unwrap_or(usize::MAX) {
+                last_printed_line = None;
+                last_file_idx = Some(ctx.m.file_idx);
+                false
+            } else {
+                let ctx_start = match_line_0.saturating_sub(context);
+                match last_printed_line {
+                    Some(last) if ctx_start > last + 1 => true,
+                    _ => false,
                 }
+            };
 
-                let before_start_line = match_line_0 - ctx.before.len();
+            if need_separator {
+                println!("--");
+            }
 
-                for (i, line) in ctx.before.iter().enumerate() {
-                    let line_idx = before_start_line + i;
-                    if let Some(last) = last_printed_line {
-                        if line_idx <= last {
-                            continue;
-                        }
+            let before_start_line = match_line_0 - ctx.before.len();
+
+            for (i, line) in ctx.before.iter().enumerate() {
+                let line_idx = before_start_line + i;
+                if let Some(last) = last_printed_line {
+                    if line_idx <= last {
+                        continue;
                     }
-                    let line_num = line_idx + 1;
-                    println!("{}-{}-{}", file_entry.path, line_num, line);
-                    last_printed_line = Some(line_idx);
                 }
+                let line_num = line_idx + 1;
+                println!("{}-{}-{}", file_entry.path, line_num, line);
+                last_printed_line = Some(line_idx);
+            }
 
-                if last_printed_line.is_none_or(|last| match_line_0 > last) {
-                    let line_num = match_line_0 + 1;
-                    println!("{}:{}:{}", file_entry.path, line_num, ctx.line_text);
-                    last_printed_line = Some(match_line_0);
-                }
+            if last_printed_line.is_none_or(|last| match_line_0 > last) {
+                let line_num = match_line_0 + 1;
+                println!("{}:{}:{}", file_entry.path, line_num, ctx.line_text);
+                last_printed_line = Some(match_line_0);
+            }
 
-                for (i, line) in ctx.after.iter().enumerate() {
-                    let line_idx = match_line_0 + 1 + i;
-                    if let Some(last) = last_printed_line {
-                        if line_idx <= last {
-                            continue;
-                        }
+            for (i, line) in ctx.after.iter().enumerate() {
+                let line_idx = match_line_0 + 1 + i;
+                if let Some(last) = last_printed_line {
+                    if line_idx <= last {
+                        continue;
                     }
-                    let line_num = line_idx + 1;
-                    println!("{}-{}-{}", file_entry.path, line_num, line);
-                    last_printed_line = Some(line_idx);
+                }
+                let line_num = line_idx + 1;
+                println!("{}-{}-{}", file_entry.path, line_num, line);
+                last_printed_line = Some(line_idx);
+            }
+        }
+    } else {
+        for m in &result.matches {
+            let file_entry = searcher.file_entry(m.file_idx).unwrap();
+            let line_num = m.line_number.unwrap_or(0);
+
+            if let Some(content) = searcher.file_content(m.file_idx) {
+                if let Ok(text) = std::str::from_utf8(content) {
+                    let lines: Vec<&str> = text.lines().collect();
+                    let line_idx = line_num.saturating_sub(1) as usize;
+                    if line_idx < lines.len() {
+                        println!("{}:{}:{}", file_entry.path, line_num, lines[line_idx]);
+                        continue;
+                    }
                 }
             }
-        } else {
-            // No context: simple match-per-line display
-            for m in &result.matches {
-                let file_entry = &index.files()[m.file_idx];
-                let line_num = m.line_number.unwrap_or(0);
-
-                if let Some(content) = index.file_content(m.file_idx) {
-                    if let Ok(text) = std::str::from_utf8(content) {
-                        let lines: Vec<&str> = text.lines().collect();
-                        let line_idx = line_num.saturating_sub(1) as usize;
-                        if line_idx < lines.len() {
-                            println!("{}:{}:{}", file_entry.path, line_num, lines[line_idx]);
-                            continue;
-                        }
-                    }
-                }
-                // Fallback if content can't be read
-                println!("{}:{}:<binary>", file_entry.path, line_num);
-            }
+            println!("{}:{}:<binary>", file_entry.path, line_num);
         }
     }
 

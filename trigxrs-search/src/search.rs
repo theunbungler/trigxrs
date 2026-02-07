@@ -20,6 +20,17 @@ use crate::reader::IndexData;
 use crate::error::Error;
 use crate::Result;
 
+/// A search query combining pattern, type, and options
+#[derive(Debug, Clone)]
+pub struct Query {
+    /// The search pattern (literal string or regex)
+    pub pattern: String,
+    /// Whether the pattern is a regex
+    pub is_regex: bool,
+    /// Search options
+    pub options: SearchOptions,
+}
+
 /// Search options for controlling search behavior
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
